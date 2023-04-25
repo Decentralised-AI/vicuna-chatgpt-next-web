@@ -11,21 +11,26 @@ const makeRequestParam = (
     stream?: boolean;
   },
 ): ChatRequest => {
+  //转化为对象包括角色、内容
   let sendMessages = messages.map((v) => ({
     role: v.role,
     content: v.content,
   }));
 
+  //选择是否过滤掉机器人信息
   if (options?.filterBot) {
     sendMessages = sendMessages.filter((m) => m.role !== "assistant");
   }
 
+  //将当前参数取出
   const modelConfig = { ...useChatStore.getState().config.modelConfig };
 
+  //设置max_tokens对用户没有太大意义
   // @yidadaa: wont send max_tokens, because it is nonsense for Muggles
   // @ts-expect-error
   delete modelConfig.max_tokens;
 
+  //返回ChatRequest格式数据，之后直接用于请求
   return {
     messages: sendMessages,
     stream: options?.stream,
@@ -113,7 +118,7 @@ export async function requestUsage() {
   if (response.total_usage) {
     response.total_usage = Math.round(response.total_usage) / 100;
   }
-  
+
   if (total.hard_limit_usd) {
     total.hard_limit_usd = Math.round(total.hard_limit_usd * 100) / 100;
   }
@@ -134,6 +139,7 @@ export async function requestChatStream(
     onController?: (controller: AbortController) => void;
   },
 ) {
+  //生成request，用于流式请求
   const req = makeRequestParam(messages, {
     stream: true,
     filterBot: options?.filterBot,
@@ -141,9 +147,11 @@ export async function requestChatStream(
 
   console.log("[Request] ", req);
 
+  //设置请求超时时间，定义AbortController 对象并且设置一个超时定时器 setTimeout()，在指定的时间内中止请求
   const controller = new AbortController();
   const reqTimeoutId = setTimeout(() => controller.abort(), TIME_OUT_MS);
 
+  //发送请求，这里可能是旧版本的api，新版本并没有chat-stream这个api，新版本直接发v1/chat/completions即可
   try {
     const res = await fetch("/api/chat-stream", {
       method: "POST",
@@ -155,33 +163,41 @@ export async function requestChatStream(
       body: JSON.stringify(req),
       signal: controller.signal,
     });
+    //取消计时器开始，解析流式数据
     clearTimeout(reqTimeoutId);
 
     let responseText = "";
 
+    //定义finish函数
     const finish = () => {
       options?.onMessage(responseText, true);
       controller.abort();
     };
 
     if (res.ok) {
+      //getReader创建读取器，从响应流中按照块读取数据并将其解码为字符串
       const reader = res.body?.getReader();
+      //使用TextDecoder解码
       const decoder = new TextDecoder();
 
       options?.onController?.(controller);
 
+      //使用while循环不断读取流中数据
       while (true) {
+        //每次循环都重新设置一个时限
         const resTimeoutId = setTimeout(() => finish(), TIME_OUT_MS);
+        //读取流中数据
         const content = await reader?.read();
         clearTimeout(resTimeoutId);
 
         if (!content || !content.value) {
           break;
         }
-
+        //流中数据有效则解码，附加到responseText
         const text = decoder.decode(content.value, { stream: true });
         responseText += text;
 
+        //将 responseText 作为参数调用 onMessage 回调函数，以通知调用方正在读取新的数据
         const done = content.done;
         options?.onMessage(responseText, false);
 
@@ -189,16 +205,20 @@ export async function requestChatStream(
           break;
         }
       }
-
+      //结束，再调用 onMessage 回调函数一次，以便通知调用方已经读取完了所有数据。然后，代码会调用 controller.abort()，请求。
+      //onmessgae接受信息进行存储以及显示
       finish();
     } else if (res.status === 401) {
+      //401处理
       console.error("Unauthorized");
       options?.onError(new Error("Unauthorized"), res.status);
     } else {
+      //其他错误
       console.error("Stream Error", res.body);
       options?.onError(new Error("Stream Error"), res.status);
     }
   } catch (err) {
+    //err处理
     console.error("NetWork Error", err);
     options?.onError(err as Error);
   }
