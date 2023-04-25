@@ -374,7 +374,7 @@ export const useChatStore = create<ChatStore>()(
           session.lastUpdate = new Date().toLocaleString();
         });
         get().updateStat(message);
-        get().summarizeSession();
+        //get().summarizeSession();
       },
 
       async onUserInput(content) {

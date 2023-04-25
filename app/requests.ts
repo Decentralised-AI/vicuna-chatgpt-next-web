@@ -1,42 +1,78 @@
-import type { ChatRequest, ChatResponse } from "./api/openai/typing";
+import type {
+  ChatRequest,
+  ChatResponse,
+  vicunaChatRequest,
+} from "./api/openai/typing";
 import { Message, ModelConfig, useAccessStore, useChatStore } from "./store";
 import { showToast } from "./components/ui-lib";
 
 const TIME_OUT_MS = 60000;
-
 const makeRequestParam = (
   messages: Message[],
   options?: {
     filterBot?: boolean;
     stream?: boolean;
   },
-): ChatRequest => {
+): vicunaChatRequest => {
   //转化为对象包括角色、内容
   let sendMessages = messages.map((v) => ({
     role: v.role,
     content: v.content,
   }));
 
+  //   pload = {
+  //   "model": model_name,#(对应openai v1/completions接口model参数)
+  //   "prompt": prompt,#(对应openai v1/completions接口message参数)
+  //   "temperature": float(temperature),#(对应openai v1/completions接口temperature参数)
+  //   "max_new_tokens": int(max_new_tokens),#(对应openai v1/completions接口max_tokens参数)
+  //   "stop": state.sep if state.sep_style == SeparatorStyle.SINGLE else state.sep2,#(对应openai v1/completions接口stop参数)
+  // }
+
+  //重新组合为vicuna可以识别的prompt
   //选择是否过滤掉机器人信息
   if (options?.filterBot) {
     sendMessages = sendMessages.filter((m) => m.role !== "assistant");
   }
-
+  //生成vicuna格式的prompt
+  const sep = "###"; //采用v1的config
+  const prompts = getPrompt(sendMessages, sep);
+  //console.log(prompt)
   //将当前参数取出
   const modelConfig = { ...useChatStore.getState().config.modelConfig };
 
   //设置max_tokens对用户没有太大意义
   // @yidadaa: wont send max_tokens, because it is nonsense for Muggles
-  // @ts-expect-error
-  delete modelConfig.max_tokens;
+  //delete modelConfig.max_tokens;
 
-  //返回ChatRequest格式数据，之后直接用于请求
+  //返回vicunaChatRequest格式数据，之后直接用于请求
   return {
-    messages: sendMessages,
-    stream: options?.stream,
-    ...modelConfig,
+    prompt: prompts,
+    model: modelConfig.model,
+    temperature: modelConfig.temperature,
+    max_new_tokens: modelConfig.max_tokens,
+    stop: sep,
   };
 };
+
+function getPrompt(messages: { role: string; content: string }[], sep: string) {
+  //
+  let ret = "";
+  for (const { role, content } of messages) {
+    let newRole = "";
+    if (role == "user") {
+      newRole = "Human";
+    } else {
+      newRole = "Assistant";
+    }
+    if (content) {
+      ret += `${newRole}: ${content}${sep}`;
+    } else {
+      ret += `${newRole}:`;
+    }
+  }
+  ret += `Assistant:`;
+  return ret;
+}
 
 function getHeaders() {
   const accessStore = useAccessStore.getState();
@@ -67,7 +103,9 @@ export function requestOpenaiClient(path: string) {
 }
 
 export async function requestChat(messages: Message[]) {
-  const req: ChatRequest = makeRequestParam(messages, { filterBot: true });
+  const req: vicunaChatRequest = makeRequestParam(messages, {
+    filterBot: true,
+  });
 
   const res = await requestOpenaiClient("v1/chat/completions")(req);
 
@@ -139,10 +177,11 @@ export async function requestChatStream(
     onController?: (controller: AbortController) => void;
   },
 ) {
+  console.log("requestChatStream");
   //生成request，用于流式请求
   const req = makeRequestParam(messages, {
     stream: true,
-    filterBot: options?.filterBot,
+    filterBot: false,
   });
 
   console.log("[Request] ", req);
@@ -153,12 +192,11 @@ export async function requestChatStream(
 
   //发送请求，这里可能是旧版本的api，新版本并没有chat-stream这个api，新版本直接发v1/chat/completions即可
   try {
-    const res = await fetch("/api/chat-stream", {
+    const res = await fetch("/worker_generate_stream", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        path: "v1/chat/completions",
-        ...getHeaders(),
+        "User-Agent": "fastchat Client",
       },
       body: JSON.stringify(req),
       signal: controller.signal,
@@ -202,6 +240,7 @@ export async function requestChatStream(
         options?.onMessage(responseText, false);
 
         if (done) {
+          console.log(responseText); //test
           break;
         }
       }
@@ -225,6 +264,7 @@ export async function requestChatStream(
 }
 
 export async function requestWithPrompt(messages: Message[], prompt: string) {
+  console.log("requestWithPrompt");
   messages = messages.concat([
     {
       role: "user",
