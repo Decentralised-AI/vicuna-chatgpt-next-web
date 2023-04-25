@@ -1,10 +1,7 @@
-import type {
-  ChatRequest,
-  ChatResponse,
-  vicunaChatRequest,
-} from "./api/openai/typing";
-import { Message, ModelConfig, useAccessStore, useChatStore } from "./store";
+import type { ChatResponse, vicunaChatRequest } from "./api/openai/typing";
 import { showToast } from "./components/ui-lib";
+import { Message, ModelConfig, useAccessStore, useChatStore } from "./store";
+import axios, { AxiosError } from "axios";
 
 const TIME_OUT_MS = 60000;
 const makeRequestParam = (
@@ -190,16 +187,14 @@ export async function requestChatStream(
   const controller = new AbortController();
   const reqTimeoutId = setTimeout(() => controller.abort(), TIME_OUT_MS);
 
-  //发送请求，这里可能是旧版本的api，新版本并没有chat-stream这个api，新版本直接发v1/chat/completions即可
+  const headers = { "User-Agent": "fastchat Client" };
+  //发送请求
   try {
-    const res = await fetch("/worker_generate_stream", {
-      method: "POST",
+    const response = await axios.post("/worker/worker_generate_stream", req, {
       headers: {
         "Content-Type": "application/json",
-        "User-Agent": "fastchat Client",
       },
-      body: JSON.stringify(req),
-      signal: controller.signal,
+      responseType: "stream", // set responseType to 'stream' to receive a stream response
     });
     //取消计时器开始，解析流式数据
     clearTimeout(reqTimeoutId);
@@ -212,55 +207,59 @@ export async function requestChatStream(
       controller.abort();
     };
 
-    if (res.ok) {
-      //getReader创建读取器，从响应流中按照块读取数据并将其解码为字符串
-      const reader = res.body?.getReader();
-      //使用TextDecoder解码
-      const decoder = new TextDecoder();
+    //getReader创建读取器，从响应流中按照块读取数据并将其解码为字符串
+    //使用TextDecoder解码
+    const stream = response.data;
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    options?.onController?.(controller);
 
-      options?.onController?.(controller);
+    //使用while循环不断读取流中数据
+    while (true) {
+      //每次循环都重新设置一个时限
+      const resTimeoutId = setTimeout(() => finish(), TIME_OUT_MS);
+      //读取流中数据
+      const content = await reader?.read();
+      clearTimeout(resTimeoutId);
 
-      //使用while循环不断读取流中数据
-      while (true) {
-        //每次循环都重新设置一个时限
-        const resTimeoutId = setTimeout(() => finish(), TIME_OUT_MS);
-        //读取流中数据
-        const content = await reader?.read();
-        clearTimeout(resTimeoutId);
-
-        if (!content || !content.value) {
-          break;
-        }
-        //流中数据有效则解码，附加到responseText
-        const text = decoder.decode(content.value, { stream: true });
-        responseText += text;
-
-        //将 responseText 作为参数调用 onMessage 回调函数，以通知调用方正在读取新的数据
-        const done = content.done;
-        options?.onMessage(responseText, false);
-
-        if (done) {
-          console.log(responseText); //test
-          break;
-        }
+      if (!content || !content.value) {
+        break;
       }
-      //结束，再调用 onMessage 回调函数一次，以便通知调用方已经读取完了所有数据。然后，代码会调用 controller.abort()，请求。
-      //onmessgae接受信息进行存储以及显示
-      finish();
-    } else if (res.status === 401) {
-      //401处理
-      console.error("Unauthorized");
-      options?.onError(new Error("Unauthorized"), res.status);
-    } else {
-      //其他错误
-      console.error("Stream Error", res.body);
-      options?.onError(new Error("Stream Error"), res.status);
+      //流中数据有效则解码，附加到responseText
+      const text = decoder.decode(content.value, { stream: true });
+      responseText += text;
+
+      //将 responseText 作为参数调用 onMessage 回调函数，以通知调用方正在读取新的数据
+      const done = content.done;
+      options?.onMessage(responseText, false);
+
+      if (done) {
+        console.log(responseText); //test
+        break;
+      }
     }
-  } catch (err) {
-    //err处理
-    console.error("NetWork Error", err);
-    options?.onError(err as Error);
+    //结束，再调用 onMessage 回调函数一次，以便通知调用方已经读取完了所有数据。然后，代码会调用 controller.abort()，请求。
+    //onmessgae接受信息进行存储以及显示
+    finish();
+  } catch (error) {
+    if (isAxiosError(error) && axios.isCancel(error)) {
+      console.log("Request canceled:", error.message);
+    } else if (
+      isAxiosError(error) &&
+      error.response &&
+      error.response.status === 401
+    ) {
+      console.error("Unauthorized");
+      options?.onError(new Error("Unauthorized"), error.response.status);
+    } else if (isAxiosError(error)) {
+      console.error("Stream Error", error);
+      options?.onError(new Error("Stream Error"), error.response?.status);
+    }
   }
+}
+
+function isAxiosError(error: unknown): error is AxiosError {
+  return (error as AxiosError).isAxiosError;
 }
 
 export async function requestWithPrompt(messages: Message[], prompt: string) {
