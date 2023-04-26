@@ -1,5 +1,6 @@
 /** @type {import('next').NextConfig} */
 
+
 const nextConfig = {
   experimental: {
     appDir: true,
@@ -13,6 +14,14 @@ const nextConfig = {
     return config;
   },
   output: "standalone",
+  async rewrites() {
+    return [
+      {
+        source: '/worker/:path*',
+        destination: 'http://localhost:21002/:path*',
+      },
+    ]
+  },
 };
 
 module.exports = nextConfig;

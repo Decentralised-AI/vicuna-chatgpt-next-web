@@ -1,8 +1,6 @@
 import type { ChatResponse, vicunaChatRequest } from "./api/openai/typing";
 import { showToast } from "./components/ui-lib";
 import { Message, ModelConfig, useAccessStore, useChatStore } from "./store";
-import axios, { AxiosError } from "axios";
-
 const TIME_OUT_MS = 60000;
 const makeRequestParam = (
   messages: Message[],
@@ -181,6 +179,7 @@ export async function requestChatStream(
     filterBot: false,
   });
 
+  const skip_echo_len = req["prompt"].replace("</s>", " ").length + 1;
   console.log("[Request] ", req);
 
   //设置请求超时时间，定义AbortController 对象并且设置一个超时定时器 setTimeout()，在指定的时间内中止请求
@@ -190,11 +189,32 @@ export async function requestChatStream(
   const headers = { "User-Agent": "fastchat Client" };
   //发送请求
   try {
-    const response = await axios.post("/worker/worker_generate_stream", req, {
+    // let axios = require('axios');
+    // let config = {
+    //   method: 'post',
+    //   url: 'http://192.168.1.101:21002/worker_generate_stream',
+    //   headers: {
+    //     'Content-Type': 'text/plain'
+    //   },
+    //   data : req
+    // };
+
+    // axios(config)
+    //     .then(function (response:any) {
+    //       console.log("test")
+    //       console.log(JSON.stringify(response.data));
+    //     })
+    //     .catch(function (error:any) {
+    //       console.log(error);
+    //     });
+
+    const res = await fetch("/worker/worker_generate_stream", {
+      method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      responseType: "stream", // set responseType to 'stream' to receive a stream response
+      body: JSON.stringify(req),
+      signal: controller.signal,
     });
     //取消计时器开始，解析流式数据
     clearTimeout(reqTimeoutId);
@@ -207,59 +227,65 @@ export async function requestChatStream(
       controller.abort();
     };
 
-    //getReader创建读取器，从响应流中按照块读取数据并将其解码为字符串
-    //使用TextDecoder解码
-    const stream = response.data;
-    const reader = stream.getReader();
-    const decoder = new TextDecoder();
-    options?.onController?.(controller);
+    if (res.ok) {
+      //getReader创建读取器，从响应流中按照块读取数据并将其解码为字符串
+      const reader = res.body?.getReader();
+      //使用TextDecoder解码
+      const decoder = new TextDecoder();
 
-    //使用while循环不断读取流中数据
-    while (true) {
-      //每次循环都重新设置一个时限
-      const resTimeoutId = setTimeout(() => finish(), TIME_OUT_MS);
-      //读取流中数据
-      const content = await reader?.read();
-      clearTimeout(resTimeoutId);
+      options?.onController?.(controller);
 
-      if (!content || !content.value) {
-        break;
+      //使用while循环不断读取流中数据
+      while (true) {
+        //每次循环都重新设置一个时限
+        const resTimeoutId = setTimeout(() => finish(), TIME_OUT_MS);
+        //读取流中数据
+        const content = await reader?.read();
+        clearTimeout(resTimeoutId);
+
+        if (!content || !content.value) {
+          break;
+        }
+
+        //流中数据有效则解码，附加到responseText 如何取出text字段，用JSON.PARSE也不行，什么鬼？？
+        const text = decoder.decode(content.value, { stream: true });
+        //console.log(text);
+        const json = parseJson(text);
+        if (json.error_code === 0) {
+          const output: string = json.text.slice(skip_echo_len).trim();
+          responseText = output;
+        } else {
+          const erroroutput: string = json.text.slice(skip_echo_len).trim();
+          responseText = erroroutput + ` ErrorCode: ${json.error_code}`;
+          break;
+        }
+
+        //将 responseText 作为参数调用 onMessage 回调函数，以通知调用方正在读取新的数据
+        const done = content.done;
+        options?.onMessage(responseText, false);
+
+        if (done) {
+          console.log(responseText); //test
+          break;
+        }
       }
-      //流中数据有效则解码，附加到responseText
-      const text = decoder.decode(content.value, { stream: true });
-      responseText += text;
-
-      //将 responseText 作为参数调用 onMessage 回调函数，以通知调用方正在读取新的数据
-      const done = content.done;
-      options?.onMessage(responseText, false);
-
-      if (done) {
-        console.log(responseText); //test
-        break;
-      }
-    }
-    //结束，再调用 onMessage 回调函数一次，以便通知调用方已经读取完了所有数据。然后，代码会调用 controller.abort()，请求。
-    //onmessgae接受信息进行存储以及显示
-    finish();
-  } catch (error) {
-    if (isAxiosError(error) && axios.isCancel(error)) {
-      console.log("Request canceled:", error.message);
-    } else if (
-      isAxiosError(error) &&
-      error.response &&
-      error.response.status === 401
-    ) {
+      //结束，再调用 onMessage 回调函数一次，以便通知调用方已经读取完了所有数据。然后，代码会调用 controller.abort()，请求。
+      //onmessgae接受信息进行存储以及显示
+      finish();
+    } else if (res.status === 401) {
+      //401处理
       console.error("Unauthorized");
-      options?.onError(new Error("Unauthorized"), error.response.status);
-    } else if (isAxiosError(error)) {
-      console.error("Stream Error", error);
-      options?.onError(new Error("Stream Error"), error.response?.status);
+      options?.onError(new Error("Unauthorized"), res.status);
+    } else {
+      //其他错误
+      console.error("Stream Error", res.body);
+      options?.onError(new Error("Stream Error"), res.status);
     }
+  } catch (err) {
+    //err处理
+    console.error("NetWork Error", err);
+    options?.onError(err as Error);
   }
-}
-
-function isAxiosError(error: unknown): error is AxiosError {
-  return (error as AxiosError).isAxiosError;
 }
 
 export async function requestWithPrompt(messages: Message[], prompt: string) {
@@ -314,3 +340,17 @@ export const ControllerPool = {
     return `${sessionIndex},${messageIndex}`;
   },
 };
+
+function parseJson(jsonStr: string) {
+  // 将 NUL 字符替换为空格
+  let decodedStr = jsonStr.replace(/\0/g, " ");
+  if (decodedStr.indexOf("%") !== -1) {
+    decodedStr = decodedStr.replace(/%([A-Fa-f0-9]{2})/g, (match, p1) => {
+      // 判断是否需要解码，如果需要则进行解码
+      const code = parseInt(p1, 16);
+      return code === 0 ? "\0" : String.fromCharCode(code);
+    });
+  }
+  // 解析 JSON 字符串
+  return JSON.parse(decodedStr);
+}
