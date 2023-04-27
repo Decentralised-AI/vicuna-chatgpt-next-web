@@ -1,5 +1,5 @@
 FROM node:18-alpine AS base
-
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.ustc.edu.cn/g' /etc/apk/repositories
 FROM base AS deps
 
 RUN apk add --no-cache libc6-compat
@@ -37,7 +37,6 @@ COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/.next/server ./.next/server
-
 EXPOSE 3000
 
 CMD if [ -n "$PROXY_URL" ]; then \

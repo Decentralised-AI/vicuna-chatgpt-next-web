@@ -1,11 +1,6 @@
-import type {
-  ChatRequest,
-  ChatResponse,
-  vicunaChatRequest,
-} from "./api/openai/typing";
-import { Message, ModelConfig, useAccessStore, useChatStore } from "./store";
+import type { ChatResponse, vicunaChatRequest } from "./api/openai/typing";
 import { showToast } from "./components/ui-lib";
-
+import { Message, ModelConfig, useAccessStore, useChatStore } from "./store";
 const TIME_OUT_MS = 60000;
 const makeRequestParam = (
   messages: Message[],
@@ -184,19 +179,20 @@ export async function requestChatStream(
     filterBot: false,
   });
 
+  const skip_echo_len = req["prompt"].replace("</s>", " ").length + 1;
   console.log("[Request] ", req);
 
   //设置请求超时时间，定义AbortController 对象并且设置一个超时定时器 setTimeout()，在指定的时间内中止请求
   const controller = new AbortController();
   const reqTimeoutId = setTimeout(() => controller.abort(), TIME_OUT_MS);
 
-  //发送请求，这里可能是旧版本的api，新版本并没有chat-stream这个api，新版本直接发v1/chat/completions即可
+  const headers = { "User-Agent": "fastchat Client" };
+  //发送请求
   try {
-    const res = await fetch("/worker_generate_stream", {
+    const res = await fetch("http://localhost:21002/worker_generate_stream", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "User-Agent": "fastchat Client",
       },
       body: JSON.stringify(req),
       signal: controller.signal,
@@ -231,9 +227,19 @@ export async function requestChatStream(
         if (!content || !content.value) {
           break;
         }
-        //流中数据有效则解码，附加到responseText
+
+        //流中数据有效则解码，附加到responseText 如何取出text字段，用JSON.PARSE也不行，什么鬼？？
         const text = decoder.decode(content.value, { stream: true });
-        responseText += text;
+        //console.log(text);
+        const json = parseJson(text);
+        if (json.error_code === 0) {
+          const output: string = json.text.slice(skip_echo_len).trim();
+          responseText = output;
+        } else {
+          const erroroutput: string = json.text.slice(skip_echo_len).trim();
+          responseText = erroroutput + ` ErrorCode: ${json.error_code}`;
+          break;
+        }
 
         //将 responseText 作为参数调用 onMessage 回调函数，以通知调用方正在读取新的数据
         const done = content.done;
@@ -315,3 +321,17 @@ export const ControllerPool = {
     return `${sessionIndex},${messageIndex}`;
   },
 };
+
+function parseJson(jsonStr: string) {
+  // 将 NUL 字符替换为空格
+  let decodedStr = jsonStr.replace(/\0/g, " ");
+  if (decodedStr.indexOf("%") !== -1) {
+    decodedStr = decodedStr.replace(/%([A-Fa-f0-9]{2})/g, (match, p1) => {
+      // 判断是否需要解码，如果需要则进行解码
+      const code = parseInt(p1, 16);
+      return code === 0 ? "\0" : String.fromCharCode(code);
+    });
+  }
+  // 解析 JSON 字符串
+  return JSON.parse(decodedStr);
+}
