@@ -14,6 +14,14 @@ const nextConfig = {
     return config;
   },
   output: "standalone",
+  async rewrites() {
+    return [
+      {
+        source: '/worker/:path*',
+        destination: 'http://localhost:21002/:path*',
+      },
+    ]
+  },
 };
 
 module.exports = nextConfig;
